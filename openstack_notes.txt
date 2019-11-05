@@ -1,0 +1,64 @@
+OVS PACKET FLOW : https://www.rdoproject.org/networking/networking-in-too-much-detail/
+OPNESTACK INSTALLATION:
+1 . Create ubuntu vm
+2 . Config static ip in interface as given in sample config below . This ip should reach internet
+
+# The primary network interface
+auto ens32
+iface ens32 inet static
+address 10.48.110.72
+netmask 255.255.255.0
+gateway 10.48.110.1
+dns-nameservers 8.8.8.8 8.8.4.4
+
+3 . git pull devstack code as in https://docs.openstack.org/devstack/latest/
+sudo useradd -s /bin/bash -d /opt/stack -m stack
+echo "stack ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/stack
+sudo su - stack
+git clone https://git.openstack.org/openstack-dev/devstack
+cd devstack
+sh with user stack and password devstack. Copy local.conf from stack@10.48.110.72:~/devstack/local.conf to /home/stack/devstack/local.conf
+
+Update local.conf to change all 10.48.110.72 to the IP assigned in the previous step. Next assign a non-overlapping Q_FLOATING_ALLOCATION_POOL by referring to the "Openstack set ups" in Nuviso VM/Server Details
+
+
+[[local|localrc]]
+HOST_IP=10.48.110.72
+SERVICE_HOST=10.48.110.72
+MYSQL_HOST=10.48.110.72
+RABBIT_HOST=10.48.110.72
+GLANCE_HOSTPORT=10.48.110.72:9292
+ADMIN_PASSWORD=secret
+DATABASE_PASSWORD=secret
+RABBIT_PASSWORD=secret
+SERVICE_PASSWORD=secret
+ 
+## Neutron options
+Q_USE_SECGROUP=True
+FLOATING_RANGE="10.48.110.0/24"
+FIXED_RANGE="15.0.0.0/24"
+Q_FLOATING_ALLOCATION_POOL=start=10.48.110.140,end=10.48.110.159
+PUBLIC_NETWORK_GATEWAY="10.48.110.1"
+PUBLIC_INTERFACE=ens32
+PUBLIC_NETWORK_NAME=external
+ 
+# Open vSwitch provider networking configuration
+Q_USE_PROVIDERNET_FOR_PUBLIC=True
+OVS_PHYSICAL_BRIDGE=br-ex
+PUBLIC_BRIDGE=br-ex
+OVS_BRIDGE_MAPPINGS=public:br-ex
+ 
+# Fix issue with the keyboard on noVNC
+NOVNC_BRANCH=v0.6.0
+ 
+ 
+#Add SFC
+enable_plugin networking-sfc https://github.com/openstack/networking-sfc.git stable/newton
+git checkout stable/newton
+./stack.sh ## this will complete the stacking process . After this openstack is ready to user
+. openrc demo demo // For demo user
+. openrc admin admin // For admin user
+
+For GUI : http://<IP>/dashboard 
+Credentials as per local.conf : demo/secret and admin/secret 
+secret is given in local.conf

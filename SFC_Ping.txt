@@ -1,0 +1,233 @@
+# Disable port security (else packets would be rejected when exiting the service VMs)
+openstack network set --disable-port-security private
+
+
+# Create ports in private network
+openstack port create --network private p1in
+openstack port create --network private p1out
+openstack port create --network private p2in
+openstack port create --network private p2out
+openstack port create --network private p3in
+openstack port create --network private p3out
+openstack port create --network private source_vm_port
+openstack port create --network private dest_vm_port
+
+#List the ports created
+openstack port list
+
+#Create ssh-keys required for VMs
+openstack keypair create ubuntu-1 > ../ssh-keys/ubuntu-1.pem
+openstack keypair create ubuntu-2 > ../ssh-keys/ubuntu-3.pem
+openstack keypair create ubuntu-3 > ../ssh-keys/ubuntu-3.pem
+openstack keypair create ubuntu-src > ../ssh-keys/ubuntu-src.pem
+openstack keypair create ubuntu-dst > ../ssh-keys/ubuntu-dst.pem
+chmod 600 ../ssh-keys/*.pem
+
+
+#Create the servers (VMs)
+
+openstack server create --image ubuntu-xenial --flavor m1.small --key-name ubuntu-1 --security-group default --nic port-id=cbfb1b23-8a92-478e-89f6-b8d2179aa199 --nic port-id=9d5200d1-1396-4c2d-b59a-15a71869dfa6 vm1
+openstack server create --image ubuntu-xenial --flavor m1.small --key-name ubuntu-2 --security-group default --nic port-id=d1e4a79e-63de-4ad5-969f-3f5d3121bf81 --nic port-id=33978943-b06f-482e-8c70-0c89e619db8d vm2
+openstack server create --image ubuntu-xenial --flavor m1.small --key-name ubuntu-3 --security-group default --nic port-id=300d6f3e-e9d6-40f6-9af8-aca4087636db --nic port-id=2a8ed238-343a-432d-9158-f096a4c5da3d vm3
+
+## Create the demo VMs (source and destination)
+openstack server create --image ubuntu-xenial --flavor m1.small --key-name ubuntu-src --security-group default --nic port-id=461150ae-ae4e-4f41-9b9b-8076d857b0db source_vm
+openstack server create --image ubuntu-xenial --flavor m1.small --key-name ubuntu-dst --security-group default --nic port-id=436e6e1b-c565-4373-8a98-8e9f0ffb2b7b dest_vm
+
+##Adding route-support for port chaining
+sh -c 'echo "auto ens4" >> /etc/network/interfaces'
+sh -c 'echo "iface ens4 inet dhcp" >> /etc/network/interfaces'
+/etc/init.d/networking restart
+sh -c 'echo 1 > /proc/sys/net/ipv4/ip_forward'
+#ip route add <dest_vm_port-IP> ens3 (ingress interface)
+#ip route add <source_vm_port-IP> dev ens4 (egress interface)
+ip route add 15.0.0.16 dev ens3
+ip route add 15.0.0.5 dev ens4
+
+
+#Create port-pairs (We need to mention inress and egress ports)
+
+neutron port-pair-create --ingress=p1in --egress=p1out PP1
+neutron port-pair-create --ingress=p2in --egress=p2out PP2
+neutron port-pair-create --ingress=p3in --egress=p3out PP3
+
+#Create port-pair group
+neutron port-pair-group-create --port-pair PP1 PG1
+neutron port-pair-group-create --port-pair PP2 PG2
+neutron port-pair-group-create --port-pair PP3 PG3
+
+##Create Flow Classfier (match criteria for service chain)
+##neutron flow-classifier-create --ethertype IPv4 --source-ip-prefix <source_vm_port-ip/32> --destination-ip-prefix <dest_vm_port/32> --logical-source-port source_vm_port FC_ping
+## To ping from source VM to destination VM
+neutron flow-classifier-create --ethertype IPv4 --source-ip-prefix 15.0.0.16/32 --destination-ip-prefix 15.0.0.5/32 --logical-source-port source_vm_port FC_ping
+##Create Port chain and its order
+neutron port-chain-create --port-pair-group PG1 --port-pair-group PG2 --port-pair-group PG3 --flow-classifier FC_ping PC1
+
+##To ping from destination VM to Source VM
+
+neutron port-pair-create --ingress=p1out --egress=p1in PP1-back
+neutron port-pair-create --ingress=p2out --egress=p2in PP2-back
+neutron port-pair-create --ingress=p3out --egress=p3in PP3-back
+
+neutron port-pair-group-create --port-pair PP1-back PG1-back
+neutron port-pair-group-create --port-pair PP2-back PG2-back
+neutron port-pair-group-create --port-pair PP3-back PG3-back
+
+neutron flow-classifier-create --ethertype IPv4 --source-ip-prefix 15.0.0.5/32 --destination-ip-prefix 15.0.0.16/32 --logical-source-port dest_vm_port FC_ping-back
+
+neutron port-chain-create --port-pair-group PG1-back --port-pair-group PG2-back --port-pair-group PG3-back --flow-classifier FC_ping-back PC1-back
+
+
+
+##Now go and run tcpdump on ens3 and ens4 of all the service VMs while pinging . 
+##tcpdump will show the packets going through service chaining. stop the ping request now tcpdump will not show any icmp packets
+
+
+################################################################BIDIRECTIONAL PORT PAIRS ##############################################################3
+neutron port-pair-create --ingress=p1out --egress=p1out PP1-bi
+neutron port-pair-create --ingress=p2out --egress=p2out PP2-bi
+neutron port-pair-create --ingress=p3out --egress=p3out PP3-bi
+
+neutron port-pair-group-create --port-pair PP1-bi PG1-bi
+neutron port-pair-group-create --port-pair PP2-bi PG2-bi
+neutron port-pair-group-create --port-pair PP3-bi PG3-bi
+
+neutron flow-classifier-create --ethertype IPv4 --source-ip-prefix 15.0.0.5/32 --destination-ip-prefix 15.0.0.16/32 --logical-source-port dest_vm_port FC_ping-bi
+
+neutron port-chain-create --port-pair-group PG1-bi --port-pair-group PG2-bi --port-pair-group PG3-bi --flow-classifier FC_ping-bi PC1-bi
+
+#with PC1-bi , echo reply packets take another route. If we want echo reply to take SC, we need to create reverse FC and PC
+
+neutron flow-classifier-create --ethertype IPv4 --source-ip-prefix 15.0.0.16/32 --destination-ip-prefix 15.0.0.5/32 --logical-source-port source_vm_port FC_ping-bi-reverse
+
+neutron port-chain-create --port-pair-group PG3-bi --port-pair-group PG2-bi --port-pair-group PG1-bi --flow-classifier FC_ping-bi-reverse PC1-bi-reverse
+
+
+Note : Here we need to update the routes in service VM to use ens4 as exit interface for both source (15.0.0.16) and destination (15.0.0.5)
+
+
+#####################################################################FLOW DETAILS FOR LOAD BALANCING IN PORT GROUP########################################################################################
+
+stack@devstack-5:~/devstack$ neutron port-pair-list
++--------------------------------------+------+--------------------------------------+--------------------------------------+
+| id                                   | name | ingress                              | egress                               |
++--------------------------------------+------+--------------------------------------+--------------------------------------+
+| 34ff9552-7f40-409b-b653-3294919d5dfb | PP2  | d1e4a79e-63de-4ad5-969f-3f5d3121bf81 | 33978943-b06f-482e-8c70-0c89e619db8d |
+| 5f1bbab5-d3be-45b1-8e98-6be45dab77bb | PP3  | 300d6f3e-e9d6-40f6-9af8-aca4087636db | 2a8ed238-343a-432d-9158-f096a4c5da3d |
+| b84a98cd-3fc2-4cf6-a8e6-df281d7b72c3 | PP1  | cbfb1b23-8a92-478e-89f6-b8d2179aa199 | 9d5200d1-1396-4c2d-b59a-15a71869dfa6 |
++--------------------------------------+------+--------------------------------------+--------------------------------------+
+stack@devstack-5:~/devstack$ neutron port-pair-group-list
++--------------------------------------+------+------------------------------------------------------------------------------------+
+| id                                   | name | port_pairs                                                                         |
++--------------------------------------+------+------------------------------------------------------------------------------------+
+| 164d3e8d-cfc3-43b8-ab76-423b555be288 | PG1  | [u'34ff9552-7f40-409b-b653-3294919d5dfb', u'b84a98cd-3fc2-4cf6-a8e6-df281d7b72c3'] |
+| bd88e91f-60c8-48c7-9bee-b1a8d6aae24a | PG2  | [u'5f1bbab5-d3be-45b1-8e98-6be45dab77bb']                                          |
++--------------------------------------+------+------------------------------------------------------------------------------------+
+stack@devstack-5:~/devstack$ neutron flow-classifier-list
++--------------------------------------+---------+------------------------------------------------------------+
+| id                                   | name    | summary                                                    |
++--------------------------------------+---------+------------------------------------------------------------+
+| 13614784-0a47-4c86-9166-98316648bd7d | FC_ping | protocol: any,                                             |
+|                                      |         | source[port]: 15.0.0.16/32[any:any],                       |
+|                                      |         | destination[port]: 15.0.0.5/32[any:any],                   |
+|                                      |         | neutron_source_port: 461150ae-ae4e-4f41-9b9b-8076d857b0db, |
+|                                      |         | neutron_destination_port: None,                            |
+|                                      |         | l7_parameters: {}                                          |
++--------------------------------------+---------+------------------------------------------------------------+
+stack@devstack-5:~/devstack$ neutron port-chain-list
++--------------------------------------+------+----------------------------------------------+-------------------------------------------+
+| id                                   | name | port_pair_groups                             | flow_classifiers                          |
++--------------------------------------+------+----------------------------------------------+-------------------------------------------+
+| ae6d825e-0fb9-4348-a506-672ebac5451f | PC1  | [u'164d3e8d-cfc3-43b8-ab76-423b555be288', u  | [u'13614784-0a47-4c86-9166-98316648bd7d'] |
+|                                      |      | 'bd88e91f-60c8-48c7-9bee-b1a8d6aae24a']      |                                           |
++--------------------------------------+------+----------------------------------------------+-------------------------------------------+
+stack@devstack-5:~/devstack$
+
+
+stack@devstack-5:~$ sudo ovs-ofctl dump-flows -O OpenFlow13 br-int
+2017-03-20T09:14:53Z|00001|ofp_actions|INFO|OFPAT_SET_MPLS_TTL is deprecated in OpenFlow13 (use Set-Field)
+2017-03-20T09:14:53Z|00002|ofp_actions|INFO|OFPAT_SET_MPLS_TTL is deprecated in OpenFlow13 (use Set-Field)
+2017-03-20T09:14:53Z|00003|ofp_actions|INFO|OFPAT_SET_MPLS_TTL is deprecated in OpenFlow13 (use Set-Field)
+OFPST_FLOW reply (OF1.3) (xid=0x2):
+ cookie=0xb35913982e3c10af, duration=270643.223s, table=0, n_packets=379270, n_bytes=37168460, priority=30,ip,in_port=17,nw_src=15.0.0.16,nw_dst=15.0.0.5 actions=group:1
+ cookie=0xb35913982e3c10af, duration=270643.142s, table=0, n_packets=379270, n_bytes=37168460, priority=30,ip,in_port=24,nw_src=15.0.0.16,nw_dst=15.0.0.5 actions=group:2
+ cookie=0xb35913982e3c10af, duration=270643.052s, table=0, n_packets=0, n_bytes=0, priority=30,ip,in_port=22,nw_src=15.0.0.16,nw_dst=15.0.0.5 actions=group:2
+ cookie=0xb35913982e3c10af, duration=270643.050s, table=0, n_packets=379270, n_bytes=37168460, priority=30,ip,in_port=26,nw_src=15.0.0.16,nw_dst=15.0.0.5 actions=NORMAL
+ cookie=0x8c29524f64d8f82e, duration=354052.159s, table=0, n_packets=0, n_bytes=0, priority=20,mpls actions=goto_table:10
+ cookie=0xb35913982e3c10af, duration=341386.918s, table=0, n_packets=4628, n_bytes=345692, priority=20,tcp,nw_src=15.0.0.16,nw_dst=15.0.0.5,tp_dst=80 actions=NORMAL
+ cookie=0xb35913982e3c10af, duration=341386.912s, table=0, n_packets=0, n_bytes=0, priority=20,udp,nw_src=15.0.0.16,nw_dst=15.0.0.5 actions=NORMAL
+ cookie=0x8c29524f64d8f82e, duration=354012.388s, table=0, n_packets=1019270, n_bytes=457384832, priority=3,in_port=1,vlan_tci=0x0000/0x1fff actions=push_vlan:0x8100,set_field:4098->vlan_vid,NORMAL
+ cookie=0x8c29524f64d8f82e, duration=354053.696s, table=0, n_packets=1, n_bytes=60, priority=2,in_port=1 actions=drop
+ cookie=0x8c29524f64d8f82e, duration=354054.431s, table=0, n_packets=4278803, n_bytes=1169021467, priority=0 actions=NORMAL
+ cookie=0xb35913982e3c10af, duration=270643.253s, table=5, n_packets=379270, n_bytes=37168460, priority=0,ip,dl_dst=fa:16:3e:cc:ea:c8 actions=push_mpls:0x8847,set_field:511->mpls_label,set_mpls_ttl(255),push_vlan:0x8100,set_field:4097->vlan_vid,resubmit(,10)
+ cookie=0xb35913982e3c10af, duration=270643.247s, table=5, n_packets=0, n_bytes=0, priority=0,ip,dl_dst=fa:16:3e:04:ae:78 actions=push_mpls:0x8847,set_field:511->mpls_label,set_mpls_ttl(255),push_vlan:0x8100,set_field:4097->vlan_vid,resubmit(,10)
+ cookie=0xb35913982e3c10af, duration=270643.078s, table=5, n_packets=379360, n_bytes=37177280, priority=0,ip,dl_dst=fa:16:3e:ea:f7:8b actions=push_mpls:0x8847,set_field:510->mpls_label,set_mpls_ttl(254),push_vlan:0x8100,set_field:4097->vlan_vid,resubmit(,10)
+ cookie=0xb35913982e3c10af, duration=270643.135s, table=10, n_packets=379270, n_bytes=37168460, priority=1,mpls,dl_vlan=1,dl_dst=fa:16:3e:cc:ea:c8,mpls_label=511 actions=pop_vlan,pop_mpls:0x0800,output:23
+ cookie=0xb35913982e3c10af, duration=270643.043s, table=10, n_packets=0, n_bytes=0, priority=1,mpls,dl_vlan=1,dl_dst=fa:16:3e:04:ae:78,mpls_label=511 actions=pop_vlan,pop_mpls:0x0800,output:21
+ cookie=0xb35913982e3c10af, duration=270643.041s, table=10, n_packets=379270, n_bytes=37168460, priority=1,mpls,dl_vlan=1,dl_dst=fa:16:3e:ea:f7:8b,mpls_label=510 actions=pop_vlan,pop_mpls:0x0800,output:25
+ cookie=0x8c29524f64d8f82e, duration=354052.158s, table=10, n_packets=15, n_bytes=1470, priority=0 actions=drop
+ cookie=0x8c29524f64d8f82e, duration=354054.433s, table=23, n_packets=0, n_bytes=0, priority=0 actions=drop
+ cookie=0x8c29524f64d8f82e, duration=354054.430s, table=24, n_packets=0, n_bytes=0, priority=0 actions=drop
+
+
+
+##########################################Notes##################################
+Port-Pair :
+
+  --service-function-parameters type=TYPE[,correlation=CORRELATION_TYPE,weight=WEIGHT]
+                        Dictionary of Service function parameters. Currently,
+                        only correlation=None and weight is supported. Weight
+                        is an integer that influences the selection of a port
+                        pair within a port pair group for a flow. The higher
+                        the weight, the more flows will hash to the port pair.
+                        The default weight is 1.
+
+The “service-function-parameter” option allows the passing of SF specific parameter information to the data path. These include:
+
+The “correlation” parameter is used to specify the type of chain correlation mechanism supported by a specific SF. 
+This is needed by the data plane switch to determine how to associate a packet with a chain. 
+This will be set to “none” for now since there is no correlation mechanism supported by the SF. In the future, it can be extended to include “mpls”, “nsh”, etc.. 
+If this parameter is not specified, it will default to “none”.
+The “weight” parameter is used to specify the weight for each SF for load distribution in a port pair group. 
+This represents a percentage of the traffic to be sent to each SF.
+
+						
+Port-Pair-Group:
+
+  --port-pair-group-parameters type=TYPE[,service_type=SERVICE_TYPE,lb_fields=LB_FIELDS]
+                        Dictionary of Port pair group parameters. Currently,
+                        only service_type=[l2,l3] and '&' separated string of
+                        the lb_fields are supported.
+
+Multiple port-pairs may be included in a “port-pair-group” to allow the specification of a set of functionally equivalent SFs that can be be used for load distribution, 
+i.e., the “port-pair” option may be repeated for multiple port-pairs of functionally equivalent SFs.
+Flow-Classifier:
+
+  --ethertype {IPv4,IPv6}
+                        L2 ethertype, default is IPv4.
+  --l7-parameters type=TYPE[,url=URL_PATH]
+                        Dictionary of L7-parameters. Currently, no value is
+                        supported for this option.
+
+						
+Port-Chain:
+  --chain-parameters [correlation=CORRELATION_TYPE, symmetric=BOOLEAN_TYPE]
+                        Dictionary of chain parameters. Supports
+                        correlation=mpls and symmetric=true|false
+						
+The “flow-classifier” option may be repeated to associate multiple flow classifiers with a port chain, with each classifier identifying a flow. 
+If the flow-classifier is not specified, then no traffic will be steered through the chain.
+Default correlation is mpls . As of now it supports only mpls
+
+
+Reference:
+https://docs.openstack.org/developer/networking-sfc/index.html
+https://docs.openstack.org/developer/networking-sfc/ovs_driver_and_agent_workflow.html
+https://docs.openstack.org/developer/networking-sfc/command_extensions.html
+
+
+
+						
+						
+
+						
